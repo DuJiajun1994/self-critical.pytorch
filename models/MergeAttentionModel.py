@@ -43,6 +43,7 @@ class MergeAttentionModel(CaptionModel):
                           range(opt.logit_layers - 1)]
             self.logit = nn.Sequential(
                 *(reduce(lambda x, y: x + y, self.logit) + [nn.Linear(self.merge_size, self.vocab_size + 1)]))
+        self.fc2att = nn.Linear(self.fc_feat_size, self.att_hid_size)
         self.ctx2att = nn.Linear(self.att_feat_size, self.att_hid_size)
         self.h2att = nn.Linear(self.rnn_size, self.att_hid_size)
         self.alpha_net = nn.Linear(self.att_hid_size, 1)
@@ -50,10 +51,10 @@ class MergeAttentionModel(CaptionModel):
                                                       self.rnn_size, self.num_layers, bias=False,
                                                       dropout=self.drop_prob_lm)
 
-    def core(self, xt, fc_embeds, att_embeds, p_att_feats, att_masks, state):
+    def core(self, xt, fc_embeds, att_embeds, p_fc_feats, p_att_feats, att_masks, state):
         rnn_feats, state = self.rnn(xt.unsqueeze(0), state)
         rnn_embeds = self.rnn_embed(rnn_feats.squeeze(0))
-        weights = self.attend(p_att_feats, att_masks, state)  # [batch, att_size]
+        weights = self.attend(p_fc_feats, p_att_feats, att_masks, state)  # [batch, att_size]
         if self.is_hard_attention:
             if (not self.sample_attention) or self.training:
                 predicts = self.predict(fc_embeds, att_embeds, rnn_embeds)  # [batch_size, att_size, vocab_size + 1]
@@ -68,11 +69,12 @@ class MergeAttentionModel(CaptionModel):
             log_prob = F.log_softmax(self.logit(F.relu(rnn_embeds + fc_embeds + att_res)))
         return log_prob, state
 
-    def attend(self, p_att_feats, att_masks, state):
+    def attend(self, p_fc_feats, p_att_feats, att_masks, state):
         att_size = p_att_feats.size(1)
         att_h = self.h2att(state[0][-1])  # batch * att_hid_size
-        att_h = att_h.unsqueeze(1).expand_as(p_att_feats)  # batch * att_size * att_hid_size
-        dot = p_att_feats + att_h  # batch * att_size * att_hid_size
+        att_other = att_h + p_fc_feats
+        att_other = att_other.unsqueeze(1).expand_as(p_att_feats)  # batch * att_size * att_hid_size
+        dot = p_att_feats + att_other  # batch * att_size * att_hid_size
         dot = F.tanh(dot)  # batch * att_size * att_hid_size
         dot = self.alpha_net(dot)  # batch * att_size * 1
         dot = dot.view(-1, att_size)  # batch * att_size
@@ -111,9 +113,10 @@ class MergeAttentionModel(CaptionModel):
         p_att_feats = pack_wrapper(self.att_embed, att_feats, att_masks)
 
         # Project the attention feats first to reduce memory and computation comsumptions.
+        pp_fc_feats = self.fc2att(fc_feats)
         pp_att_feats = pack_wrapper(self.ctx2att, att_feats, att_masks)
 
-        return p_fc_feats, p_att_feats, pp_att_feats, att_masks
+        return p_fc_feats, p_att_feats, pp_fc_feats, pp_att_feats, att_masks
 
     def _forward(self, fc_feats, att_feats, seq, att_masks=None):
         batch_size = fc_feats.size(0)
@@ -122,7 +125,7 @@ class MergeAttentionModel(CaptionModel):
         outputs = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size + 1)
 
         # Prepare the features
-        p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
+        p_fc_feats, p_att_feats, pp_fc_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
         # pp_att_feats is used for attention, we cache it in advance to reduce computation cost
 
         for i in range(seq.size(1) - 1):
@@ -142,22 +145,22 @@ class MergeAttentionModel(CaptionModel):
             if i >= 1 and seq[:, i].sum() == 0:
                 break
 
-            output, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
+            output, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_fc_feats, pp_att_feats, p_att_masks, state)
             outputs[:, i] = output
 
         return outputs
 
-    def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state):
+    def get_logprobs_state(self, it, fc_feats, att_feats, p_fc_feats, p_att_feats, att_masks, state):
         # 'it' contains a word index
         xt = self.embed(it)
-        logprobs, state = self.core(xt, fc_feats, att_feats, p_att_feats, att_masks, state)
+        logprobs, state = self.core(xt, fc_feats, att_feats, p_fc_feats, p_att_feats, att_masks, state)
         return logprobs, state
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
         beam_size = opt.get('beam_size', 10)
         batch_size = fc_feats.size(0)
 
-        p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
+        p_fc_feats, p_att_feats, pp_fc_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
 
         assert beam_size <= self.vocab_size + 1, 'lets assume this for now, otherwise this corner case causes a few headaches down the road. can be dealt with in future if needed'
         seq = torch.LongTensor(self.seq_length, batch_size).zero_()
@@ -169,6 +172,7 @@ class MergeAttentionModel(CaptionModel):
             state = self.init_hidden(beam_size)
             tmp_fc_feats = p_fc_feats[k:k + 1].expand(beam_size, p_fc_feats.size(1))
             tmp_att_feats = p_att_feats[k:k + 1].expand(*((beam_size,) + p_att_feats.size()[1:])).contiguous()
+            tmp_p_fc_feats = pp_fc_feats[k:k + 1].expand(*((beam_size,) + pp_fc_feats.size()[1:])).contiguous()
             tmp_p_att_feats = pp_att_feats[k:k + 1].expand(*((beam_size,) + pp_att_feats.size()[1:])).contiguous()
             tmp_att_masks = p_att_masks[k:k + 1].expand(
                 *((beam_size,) + p_att_masks.size()[1:])).contiguous() if att_masks is not None else None
@@ -177,10 +181,10 @@ class MergeAttentionModel(CaptionModel):
                 if t == 0:  # input <bos>
                     it = fc_feats.new_zeros([beam_size], dtype=torch.long)
 
-                logprobs, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats,
+                logprobs, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_fc_feats, tmp_p_att_feats,
                                                           tmp_att_masks, state)
 
-            self.done_beams[k] = self.beam_search(state, logprobs, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats,
+            self.done_beams[k] = self.beam_search(state, logprobs, tmp_fc_feats, tmp_att_feats, tmp_p_fc_feats, tmp_p_att_feats,
                                                   tmp_att_masks, opt=opt)
             seq[:, k] = self.done_beams[k][0]['seq']  # the first beam has highest cumulative score
             seqLogprobs[:, k] = self.done_beams[k][0]['logps']
@@ -199,7 +203,7 @@ class MergeAttentionModel(CaptionModel):
         batch_size = fc_feats.size(0)
         state = self.init_hidden(batch_size)
 
-        p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
+        p_fc_feats, p_att_feats, pp_fc_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
 
         seq = fc_feats.new_zeros((batch_size, self.seq_length), dtype=torch.long)
         seqLogprobs = fc_feats.new_zeros(batch_size, self.seq_length)
@@ -207,7 +211,7 @@ class MergeAttentionModel(CaptionModel):
             if t == 0:  # input <bos>
                 it = fc_feats.new_zeros(batch_size, dtype=torch.long)
 
-            logprobs, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
+            logprobs, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_fc_feats, pp_att_feats, p_att_masks, state)
 
             if decoding_constraint and t > 0:
                 tmp = logprobs.new_zeros(logprobs.size())
