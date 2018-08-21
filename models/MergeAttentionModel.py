@@ -48,7 +48,7 @@ class MergeAttentionModel(CaptionModel):
         self.h2att = nn.Linear(self.rnn_size, self.att_hid_size)
         self.alpha_net = nn.Linear(self.att_hid_size, 1)
         self.rnn = getattr(nn, self.rnn_type.upper())(self.input_encoding_size,
-                                                      self.rnn_size, self.num_layers, bias=False,
+                                                      self.rnn_size, self.num_layers,
                                                       dropout=self.drop_prob_lm)
 
     def core(self, xt, fc_embeds, att_embeds, p_fc_feats, p_att_feats, att_masks, state):
