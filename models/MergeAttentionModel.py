@@ -23,7 +23,7 @@ class MergeAttentionModel(CaptionModel):
         self.fc_feat_size = opt.fc_feat_size
         self.att_feat_size = opt.att_feat_size
         self.att_hid_size = opt.att_hid_size
-        self.merge_size = 512
+        self.merge_size = 1024
         self.is_hard_attention = True
         self.sample_attention = True
 
@@ -62,7 +62,9 @@ class MergeAttentionModel(CaptionModel):
                 log_prob = torch.log(predicts + 1e-10)
             else:
                 _, indices = torch.max(weights, 1)
-                att_res = torch.index_select(att_embeds, 0, indices)
+                one_hot = weights.new_zeros(weights.size(0), weights.size(1))
+                one_hot.scatter_(1, indices.view(-1, 1), 1)
+                att_res = torch.bmm(one_hot.unsqueeze(1), att_embeds).squeeze(1)
                 log_prob = F.log_softmax(self.logit(F.relu(rnn_embeds + fc_embeds + att_res)))
         else:
             att_res = torch.bmm(weights.unsqueeze(1), att_embeds).squeeze(1)  # batch * att_feat_size
