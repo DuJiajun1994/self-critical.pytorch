@@ -25,7 +25,7 @@ class MergeAttentionModel(CaptionModel):
         self.att_hid_size = opt.att_hid_size
         self.merge_size = 1024
         self.is_hard_attention = True
-        self.sample_attention = True
+        self.sample_attention = False
 
         self.use_bn = getattr(opt, 'use_bn', 0)
 
