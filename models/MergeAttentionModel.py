@@ -36,17 +36,28 @@ class MergeAttentionModel(CaptionModel):
         self.att_embed = nn.Linear(self.att_feat_size, self.merge_size)
         self.rnn_embed = nn.Linear(self.rnn_size, self.merge_size)
         self.logit_layers = getattr(opt, 'logit_layers', 1)
-        if self.logit_layers == 1:
-            self.logit = nn.Linear(self.merge_size, self.vocab_size + 1)
-        else:
-            self.logit = [[nn.Linear(self.merge_size, self.merge_size), nn.ReLU(), nn.Dropout(0.5)] for _ in
-                          range(opt.logit_layers - 1)]
-            self.logit = nn.Sequential(
-                *(reduce(lambda x, y: x + y, self.logit) + [nn.Linear(self.merge_size, self.vocab_size + 1)]))
+        self.logit = [
+            [nn.Linear(self.merge_size, self.merge_size), nn.ReLU(), nn.Dropout(0.5)]
+            for _ in range(opt.logit_layers - 1)
+        ]
+        self.logit = nn.Sequential(*(
+                [nn.ReLU(), nn.Dropout(0.5)]
+                + reduce(lambda x, y: x + y, self.logit, [])
+                + [nn.Linear(self.merge_size, self.vocab_size + 1)]
+        ))
         self.fc2att = nn.Linear(self.fc_feat_size, self.att_hid_size)
         self.ctx2att = nn.Linear(self.att_feat_size, self.att_hid_size)
         self.h2att = nn.Linear(self.rnn_size, self.att_hid_size)
-        self.alpha_net = nn.Linear(self.att_hid_size, 1)
+        self.att_layers = 1
+        self.alpha_net = [
+            [nn.Linear(self.att_hid_size, self.att_hid_size), nn.ReLU(), nn.Dropout(0.5)]
+            for _ in range(self.att_layers - 1)
+        ]
+        self.alpha_net = nn.Sequential(*(
+                [nn.Tanh(), nn.Dropout(0.5)]
+                + reduce(lambda x, y: x + y, self.alpha_net, [])
+                + [nn.Linear(self.att_hid_size, 1)]
+        ))
         self.rnn = getattr(nn, self.rnn_type.upper())(self.input_encoding_size,
                                                       self.rnn_size, self.num_layers,
                                                       dropout=self.drop_prob_lm)
@@ -65,10 +76,10 @@ class MergeAttentionModel(CaptionModel):
                 one_hot = weights.new_zeros(weights.size(0), weights.size(1))
                 one_hot.scatter_(1, indices.view(-1, 1), 1)
                 att_res = torch.bmm(one_hot.unsqueeze(1), att_embeds).squeeze(1)
-                log_prob = F.log_softmax(self.logit(F.relu(rnn_embeds + fc_embeds + att_res)))
+                log_prob = F.log_softmax(self.logit(rnn_embeds + fc_embeds + att_res))
         else:
             att_res = torch.bmm(weights.unsqueeze(1), att_embeds).squeeze(1)  # batch * att_feat_size
-            log_prob = F.log_softmax(self.logit(F.relu(rnn_embeds + fc_embeds + att_res)))
+            log_prob = F.log_softmax(self.logit(rnn_embeds + fc_embeds + att_res))
         return log_prob, state
 
     def attend(self, p_fc_feats, p_att_feats, att_masks, state):
@@ -77,7 +88,6 @@ class MergeAttentionModel(CaptionModel):
         att_other = att_h + p_fc_feats
         att_other = att_other.unsqueeze(1).expand_as(p_att_feats)  # batch * att_size * att_hid_size
         dot = p_att_feats + att_other  # batch * att_size * att_hid_size
-        dot = F.tanh(dot)  # batch * att_size * att_hid_size
         dot = self.alpha_net(dot)  # batch * att_size * 1
         dot = dot.view(-1, att_size)  # batch * att_size
         weights = F.softmax(dot)
@@ -90,7 +100,7 @@ class MergeAttentionModel(CaptionModel):
         other_embeds = fc_embeds + rnn_embeds
         other_embeds = other_embeds.unsqueeze(1).expand_as(att_embeds)
         all_embeds = att_embeds + other_embeds
-        logits = self.logit(F.relu(all_embeds))
+        logits = self.logit(all_embeds)
         predicts = F.softmax(logits, dim=-1)
         return predicts
 
