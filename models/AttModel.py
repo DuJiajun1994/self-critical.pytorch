@@ -25,6 +25,21 @@ from torch.nn.utils.rnn import PackedSequence, pack_padded_sequence, pad_packed_
 
 from .CaptionModel import CaptionModel
 
+
+def expand_tensor(tensor, att_size):
+    """
+
+    :param tensor: batch_size, num_channels
+    :param att_size:
+    :return:  batch_size * att_size, num_channels
+    """
+    batch_size = tensor.size(0)
+    num_channels = tensor.size(1)
+    tensor = tensor.unsqueeze(1).expand(batch_size, att_size, num_channels)
+    tensor = tensor.contiguous().view(-1, num_channels)
+    return tensor
+
+
 def sort_pack_padded_sequence(input, lengths):
     sorted_lengths, indices = torch.sort(lengths, descending=True)
     tmp = pack_padded_sequence(input[indices], sorted_lengths, batch_first=True)
@@ -75,12 +90,6 @@ class AttModel(CaptionModel):
                                     nn.Dropout(self.drop_prob_lm))+
                                     ((nn.BatchNorm1d(self.rnn_size),) if self.use_bn==2 else ())))
 
-        self.logit_layers = getattr(opt, 'logit_layers', 1)
-        if self.logit_layers == 1:
-            self.logit = nn.Linear(self.rnn_size, self.vocab_size + 1)
-        else:
-            self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 1)]
-            self.logit = nn.Sequential(*(reduce(lambda x,y:x+y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
         self.ctx2att = nn.Linear(self.rnn_size, self.att_hid_size)
 
     def init_hidden(self, bsz):
@@ -146,11 +155,8 @@ class AttModel(CaptionModel):
     def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state):
         # 'it' contains a word index
         xt = self.embed(it)
-
-        output, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
-        logprobs = F.log_softmax(self.logit(output), dim=1)
-
-        return logprobs, state
+        log_prob, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
+        return log_prob, state
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
         beam_size = opt.get('beam_size', 10)
@@ -534,10 +540,8 @@ class Attention(nn.Module):
         if att_masks is not None:
             weight = weight * att_masks.view(-1, att_size).float()
             weight = weight / weight.sum(1, keepdim=True) # normalize to 1
-        att_feats_ = att_feats.view(-1, att_size, att_feats.size(-1)) # batch * att_size * att_feat_size
-        att_res = torch.bmm(weight.unsqueeze(1), att_feats_).squeeze(1) # batch * att_feat_size
+        return weight
 
-        return att_res
 
 class Att2in2Core(nn.Module):
     def __init__(self, opt):
@@ -550,6 +554,7 @@ class Att2in2Core(nn.Module):
         self.fc_feat_size = opt.fc_feat_size
         self.att_feat_size = opt.att_feat_size
         self.att_hid_size = opt.att_hid_size
+        self.vocab_size = opt.vocab_size
         
         # Build a LSTM
         self.a2c = nn.Linear(self.rnn_size, 2 * self.rnn_size)
@@ -557,10 +562,18 @@ class Att2in2Core(nn.Module):
         self.h2h = nn.Linear(self.rnn_size, 5 * self.rnn_size)
         self.dropout = nn.Dropout(self.drop_prob_lm)
 
+        self.logit_layers = getattr(opt, 'logit_layers', 1)
+        if self.logit_layers == 1:
+            self.logit = nn.Linear(self.rnn_size, self.vocab_size + 1)
+        else:
+            self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 1)]
+            self.logit = nn.Sequential(*(reduce(lambda x,y:x+y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
+
         self.attention = Attention(opt)
+        self.is_hard_attention = True
 
     def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None):
-        att_res = self.attention(state[0][-1], att_feats, p_att_feats, att_masks)
+        weight = self.attention(state[0][-1], att_feats, p_att_feats, att_masks)
 
         all_input_sums = self.i2h(xt) + self.h2h(state[0][-1])
         sigmoid_chunk = all_input_sums.narrow(1, 0, 3 * self.rnn_size)
@@ -568,18 +581,50 @@ class Att2in2Core(nn.Module):
         in_gate = sigmoid_chunk.narrow(1, 0, self.rnn_size)
         forget_gate = sigmoid_chunk.narrow(1, self.rnn_size, self.rnn_size)
         out_gate = sigmoid_chunk.narrow(1, self.rnn_size * 2, self.rnn_size)
+        forget_res = forget_gate * state[1][-1]
 
-        in_transform = all_input_sums.narrow(1, 3 * self.rnn_size, 2 * self.rnn_size) + \
-            self.a2c(att_res)
-        in_transform = torch.max(\
-            in_transform.narrow(1, 0, self.rnn_size),
-            in_transform.narrow(1, self.rnn_size, self.rnn_size))
-        next_c = forget_gate * state[1][-1] + in_gate * in_transform
+        batch_size = att_feats.size(0)
+        att_feat_size = att_feats.size(-1)
+        att_size = att_feats.numel() // batch_size // att_feat_size
+        att_feats = att_feats.view(batch_size, att_size, att_feat_size)
+
+        if self.is_hard_attention:
+            all_input_sums = expand_tensor(all_input_sums, att_size)
+            in_gate = expand_tensor(in_gate, att_size)
+            forget_res = expand_tensor(forget_res, att_size)
+            out_gate = expand_tensor(out_gate, att_size)
+
+            att_res = att_feats.view(-1, att_feat_size)  # (batch * att_size) * att_feat_size
+            output, state = self._core_func(all_input_sums, att_res, in_gate, forget_res, out_gate)
+            predicts = F.softmax(self.logit(output), dim=-1).view(batch_size, att_size, -1)
+            prob = torch.bmm(weight.unsqueeze(1), predicts).squeeze(1)
+            log_prob = torch.log(prob + 1e-10)
+
+            _, indices = torch.max(weight, 1)
+            one_hot = weight.new_zeros(weight.size(0), weight.size(1))
+            one_hot.scatter_(1, indices.view(batch_size, 1), 1)
+            h = state[0].view(batch_size, att_size, self.rnn_size)
+            h = torch.bmm(one_hot.unsqueeze(1), h).view(-1, batch_size, self.rnn_size)
+            c = state[1].view(batch_size, att_size, self.rnn_size)
+            c = torch.bmm(one_hot.unsqueeze(1), c).view(-1, batch_size, self.rnn_size)
+            state = (h, c)
+        else:
+            att_res = torch.bmm(weight.unsqueeze(1), att_feats).squeeze(1)  # batch * att_feat_size
+            output, state = self._core_func(all_input_sums, att_res, in_gate, forget_res, out_gate)
+            log_prob = F.log_softmax(self.logit(output), dim=1)
+        return log_prob, state
+
+    def _core_func(self, all_input_sums, att_res, in_gate, forget_res, out_gate):
+        in_transform = all_input_sums.narrow(1, 3 * self.rnn_size, 2 * self.rnn_size) \
+                       + self.a2c(att_res)
+        in_transform = torch.max(in_transform.narrow(1, 0, self.rnn_size),
+                                 in_transform.narrow(1, self.rnn_size, self.rnn_size))
+        next_c = forget_res + in_gate * in_transform
         next_h = out_gate * F.tanh(next_c)
-
         output = self.dropout(next_h)
         state = (next_h.unsqueeze(0), next_c.unsqueeze(0))
         return output, state
+
 
 class Att2inCore(Att2in2Core):
     def __init__(self, opt):
@@ -689,5 +734,3 @@ class Att2inModel(AttModel):
     def init_weights(self):
         initrange = 0.1
         self.embed.weight.data.uniform_(-initrange, initrange)
-        self.logit.bias.data.fill_(0)
-        self.logit.weight.data.uniform_(-initrange, initrange)
