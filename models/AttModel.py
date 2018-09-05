@@ -600,13 +600,13 @@ class Att2in2Core(nn.Module):
             prob = torch.bmm(weight.unsqueeze(1), predicts).squeeze(1)
             log_prob = torch.log(prob + 1e-10)
 
-            _, indices = torch.max(weight, 1)
-            one_hot = weight.new_zeros(weight.size(0), weight.size(1))
-            one_hot.scatter_(1, indices.view(batch_size, 1), 1)
+            # _, indices = torch.max(weight, 1)
+            # one_hot = weight.new_zeros(weight.size(0), weight.size(1))
+            # one_hot.scatter_(1, indices.view(batch_size, 1), 1)
             h = state[0].view(batch_size, att_size, self.rnn_size)
-            h = torch.bmm(one_hot.unsqueeze(1), h).view(-1, batch_size, self.rnn_size)
+            h = torch.bmm(weight.unsqueeze(1), h).view(-1, batch_size, self.rnn_size)
             c = state[1].view(batch_size, att_size, self.rnn_size)
-            c = torch.bmm(one_hot.unsqueeze(1), c).view(-1, batch_size, self.rnn_size)
+            c = torch.bmm(weight.unsqueeze(1), c).view(-1, batch_size, self.rnn_size)
             state = (h, c)
         else:
             att_res = torch.bmm(weight.unsqueeze(1), att_feats).squeeze(1)  # batch * att_feat_size
