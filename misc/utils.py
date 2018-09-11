@@ -54,15 +54,21 @@ class RewardCriterion(nn.Module):
 class LanguageModelCriterion(nn.Module):
     def __init__(self):
         super(LanguageModelCriterion, self).__init__()
+        self.baseline = 0
 
-    def forward(self, input, target, mask):
+    def forward(self, log_prob_y, log_prob_s, target, mask):
         # truncate to the same size
-        target = target[:, :input.size(1)]
-        mask =  mask[:, :input.size(1)]
+        sequence_length = log_prob_y.size(1)
+        target = target[:, :sequence_length]
+        mask = mask[:, :sequence_length]
 
-        output = -input.gather(2, target.unsqueeze(2)).squeeze(2) * mask
-        output = torch.sum(output) / torch.sum(mask)
+        log_prob_y = log_prob_y.gather(2, target.unsqueeze(2)).squeeze(2) * mask
+        output = -(log_prob_s * (log_prob_y.clone().detach() - self.baseline) + log_prob_y)
+        output = output.sum() / mask.sum()
 
+        update = (log_prob_y.sum() / mask.sum()).data.item()
+        self.baseline = self.baseline * 0.9 + update * 0.1
+        print('update {}, baseline {}'.format(update, self.baseline))
         return output
 
 def set_lr(optimizer, lr):

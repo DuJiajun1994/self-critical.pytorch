@@ -122,7 +122,8 @@ def train(opt):
         
         optimizer.zero_grad()
         if not sc_flag:
-            loss = crit(dp_model(fc_feats, att_feats, labels, att_masks), labels[:,1:], masks[:,1:])
+            log_prob_y, log_prob_s = dp_model(fc_feats, att_feats, labels, att_masks)
+            loss = crit(log_prob_y, log_prob_s, labels[:, 1:], masks[:, 1:])
         else:
             gen_result, sample_logprobs = dp_model(fc_feats, att_feats, att_masks, opt={'sample_max':0}, mode='sample')
             reward = get_self_critical_reward(dp_model, fc_feats, att_feats, att_masks, data, gen_result, opt)

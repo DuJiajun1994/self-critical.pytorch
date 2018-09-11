@@ -112,7 +112,8 @@ class AttModel(CaptionModel):
         batch_size = fc_feats.size(0)
         state = self.init_hidden(batch_size)
 
-        outputs = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size+1)
+        log_prob_ys = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size+1)
+        log_prob_ss = fc_feats.new_zeros(batch_size, seq.size(1) - 1)
 
         # Prepare the features
         p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
@@ -130,7 +131,7 @@ class AttModel(CaptionModel):
                     #prob_prev = torch.exp(outputs[-1].data.index_select(0, sample_ind)) # fetch prev distribution: shape Nx(M+1)
                     #it.index_copy_(0, sample_ind, torch.multinomial(prob_prev, 1).view(-1))
                     # prob_prev = torch.exp(outputs[-1].data) # fetch prev distribution: shape Nx(M+1)
-                    prob_prev = torch.exp(outputs[:, i-1].detach()) # fetch prev distribution: shape Nx(M+1)
+                    prob_prev = torch.exp(log_prob_ys[:, i-1].detach()) # fetch prev distribution: shape Nx(M+1)
                     it.index_copy_(0, sample_ind, torch.multinomial(prob_prev, 1).view(-1).index_select(0, sample_ind))
             else:
                 it = seq[:, i].clone()          
@@ -138,19 +139,19 @@ class AttModel(CaptionModel):
             if i >= 1 and seq[:, i].sum() == 0:
                 break
 
-            output, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
-            outputs[:, i] = output
+            log_prob_y, log_prob_s, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
+            log_prob_ys[:, i] = log_prob_y
+            log_prob_ss[:, i] = log_prob_s
 
-        return outputs
+        return log_prob_ys, log_prob_ss
 
     def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state):
         # 'it' contains a word index
         xt = self.embed(it)
 
-        output, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
-        logprobs = F.log_softmax(self.logit(output), dim=1)
-
-        return logprobs, state
+        output, log_prob_s, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
+        log_prob_y = F.log_softmax(self.logit(output), dim=1)
+        return log_prob_y, log_prob_s, state
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
         beam_size = opt.get('beam_size', 10)
@@ -175,7 +176,7 @@ class AttModel(CaptionModel):
                 if t == 0: # input <bos>
                     it = fc_feats.new_zeros([beam_size], dtype=torch.long)
 
-                logprobs, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state)
+                logprobs, _, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state)
 
             self.done_beams[k] = self.beam_search(state, logprobs, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, opt=opt)
             seq[:, k] = self.done_beams[k][0]['seq'] # the first beam has highest cumulative score
@@ -203,7 +204,7 @@ class AttModel(CaptionModel):
             if t == 0: # input <bos>
                 it = fc_feats.new_zeros(batch_size, dtype=torch.long)
 
-            logprobs, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
+            logprobs, _, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
             
             if decoding_constraint and t > 0:
                 tmp = logprobs.new_zeros(logprobs.size())
@@ -534,10 +535,7 @@ class Attention(nn.Module):
         if att_masks is not None:
             weight = weight * att_masks.view(-1, att_size).float()
             weight = weight / weight.sum(1, keepdim=True) # normalize to 1
-        att_feats_ = att_feats.view(-1, att_size, att_feats.size(-1)) # batch * att_size * att_feat_size
-        att_res = torch.bmm(weight.unsqueeze(1), att_feats_).squeeze(1) # batch * att_feat_size
-
-        return att_res
+        return weight
 
 class Att2in2Core(nn.Module):
     def __init__(self, opt):
@@ -560,7 +558,7 @@ class Att2in2Core(nn.Module):
         self.attention = Attention(opt)
 
     def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None):
-        att_res = self.attention(state[0][-1], att_feats, p_att_feats, att_masks)
+        weight = self.attention(state[0][-1], att_feats, p_att_feats, att_masks)
 
         all_input_sums = self.i2h(xt) + self.h2h(state[0][-1])
         sigmoid_chunk = all_input_sums.narrow(1, 0, 3 * self.rnn_size)
@@ -569,17 +567,27 @@ class Att2in2Core(nn.Module):
         forget_gate = sigmoid_chunk.narrow(1, self.rnn_size, self.rnn_size)
         out_gate = sigmoid_chunk.narrow(1, self.rnn_size * 2, self.rnn_size)
 
+        if self.training:
+            indices = weight.multinomial(num_samples=1)
+        else:
+            indices = weight.argmax(dim=-1)
+        one_hot = weight.new_zeros(weight.size())
+        one_hot.scatter_(1, indices.view(-1, 1), 1)
+        att_res = torch.bmm(one_hot.unsqueeze(1), att_feats).squeeze(1)
+
+        prob_s = weight.gather(dim=1, index=indices.view(-1, 1)).squeeze(1)
+        log_prob_s = torch.log(prob_s + 1e-10)
+
         in_transform = all_input_sums.narrow(1, 3 * self.rnn_size, 2 * self.rnn_size) + \
             self.a2c(att_res)
-        in_transform = torch.max(\
-            in_transform.narrow(1, 0, self.rnn_size),
-            in_transform.narrow(1, self.rnn_size, self.rnn_size))
+        in_transform = torch.max(in_transform.narrow(1, 0, self.rnn_size),
+                                 in_transform.narrow(1, self.rnn_size, self.rnn_size))
         next_c = forget_gate * state[1][-1] + in_gate * in_transform
         next_h = out_gate * F.tanh(next_c)
 
         output = self.dropout(next_h)
         state = (next_h.unsqueeze(0), next_c.unsqueeze(0))
-        return output, state
+        return output, log_prob_s, state
 
 class Att2inCore(Att2in2Core):
     def __init__(self, opt):
