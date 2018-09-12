@@ -620,7 +620,18 @@ class Att2all2Core(nn.Module):
         self.attention = Attention(opt)
 
     def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None):
-        att_res = self.attention(state[0][-1], att_feats, p_att_feats, att_masks)
+        weight = self.attention(state[0][-1], att_feats, p_att_feats, att_masks)
+
+        if self.training:
+            indices = weight.multinomial(num_samples=1)
+        else:
+            indices = weight.argmax(dim=-1)
+        one_hot = weight.new_zeros(weight.size())
+        one_hot.scatter_(1, indices.view(-1, 1), 1)
+        att_res = torch.bmm(one_hot.unsqueeze(1), att_feats).squeeze(1)
+
+        prob_s = weight.gather(dim=1, index=indices.view(-1, 1)).squeeze(1)
+        log_prob_s = torch.log(prob_s + 1e-10)
 
         all_input_sums = self.i2h(xt) + self.h2h(state[0][-1]) + self.a2h(att_res)
         sigmoid_chunk = all_input_sums.narrow(1, 0, 3 * self.rnn_size)
@@ -630,15 +641,14 @@ class Att2all2Core(nn.Module):
         out_gate = sigmoid_chunk.narrow(1, self.rnn_size * 2, self.rnn_size)
 
         in_transform = all_input_sums.narrow(1, 3 * self.rnn_size, 2 * self.rnn_size)
-        in_transform = torch.max(\
-            in_transform.narrow(1, 0, self.rnn_size),
-            in_transform.narrow(1, self.rnn_size, self.rnn_size))
+        in_transform = torch.max(in_transform.narrow(1, 0, self.rnn_size),
+                                 in_transform.narrow(1, self.rnn_size, self.rnn_size))
         next_c = forget_gate * state[1][-1] + in_gate * in_transform
         next_h = out_gate * F.tanh(next_c)
 
         output = self.dropout(next_h)
         state = (next_h.unsqueeze(0), next_c.unsqueeze(0))
-        return output, state
+        return output, log_prob_s, state
 
 class AdaAttModel(AttModel):
     def __init__(self, opt):

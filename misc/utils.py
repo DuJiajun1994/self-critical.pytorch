@@ -63,6 +63,7 @@ class LanguageModelCriterion(nn.Module):
         mask = mask[:, :sequence_length]
 
         log_prob_y = log_prob_y.gather(2, target.unsqueeze(2)).squeeze(2) * mask
+        log_prob_s = log_prob_s * mask
         loss = -(log_prob_s * (log_prob_y.clone().detach() - self.baseline) + log_prob_y)
         loss = loss.sum() / mask.sum()
         cross_entropy_loss = - log_prob_y
