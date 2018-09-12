@@ -63,13 +63,15 @@ class LanguageModelCriterion(nn.Module):
         mask = mask[:, :sequence_length]
 
         log_prob_y = log_prob_y.gather(2, target.unsqueeze(2)).squeeze(2) * mask
-        output = -(log_prob_s * (log_prob_y.clone().detach() - self.baseline) + log_prob_y)
-        output = output.sum() / mask.sum()
+        loss = -(log_prob_s * (log_prob_y.clone().detach() - self.baseline) + log_prob_y)
+        loss = loss.sum() / mask.sum()
+        cross_entropy_loss = - log_prob_y
+        cross_entropy_loss = cross_entropy_loss.sum() / mask.sum()
 
         update = (log_prob_y.sum() / mask.sum()).data.item()
         self.baseline = self.baseline * 0.9 + update * 0.1
         print('update {}, baseline {}'.format(update, self.baseline))
-        return output
+        return loss, cross_entropy_loss
 
 def set_lr(optimizer, lr):
     for group in optimizer.param_groups:

@@ -123,7 +123,7 @@ def train(opt):
         optimizer.zero_grad()
         if not sc_flag:
             log_prob_y, log_prob_s = dp_model(fc_feats, att_feats, labels, att_masks)
-            loss = crit(log_prob_y, log_prob_s, labels[:, 1:], masks[:, 1:])
+            loss, cross_entropy_loss = crit(log_prob_y, log_prob_s, labels[:, 1:], masks[:, 1:])
         else:
             gen_result, sample_logprobs = dp_model(fc_feats, att_feats, att_masks, opt={'sample_max':0}, mode='sample')
             reward = get_self_critical_reward(dp_model, fc_feats, att_feats, att_masks, data, gen_result, opt)
@@ -132,7 +132,7 @@ def train(opt):
         loss.backward()
         utils.clip_gradient(optimizer, opt.grad_clip)
         optimizer.step()
-        train_loss = loss.item()
+        train_loss = cross_entropy_loss.item()
         torch.cuda.synchronize()
         end = time.time()
         if not sc_flag:
