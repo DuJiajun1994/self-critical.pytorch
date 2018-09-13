@@ -200,11 +200,12 @@ class AttModel(CaptionModel):
 
         seq = fc_feats.new_zeros((batch_size, self.seq_length), dtype=torch.long)
         seqLogprobs = fc_feats.new_zeros(batch_size, self.seq_length)
+        log_prob_ss = fc_feats.new_zeros(batch_size, self.seq_length)
         for t in range(self.seq_length + 1):
             if t == 0: # input <bos>
                 it = fc_feats.new_zeros(batch_size, dtype=torch.long)
 
-            logprobs, _, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
+            logprobs, log_prob_s, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
             
             if decoding_constraint and t > 0:
                 tmp = logprobs.new_zeros(logprobs.size())
@@ -235,11 +236,12 @@ class AttModel(CaptionModel):
             it = it * unfinished.type_as(it)
             seq[:,t] = it
             seqLogprobs[:,t] = sampleLogprobs.view(-1)
+            log_prob_ss[:, t] = log_prob_s
             # quit loop if all sequences have finished
             if unfinished.sum() == 0:
                 break
 
-        return seq, seqLogprobs
+        return seq, seqLogprobs, log_prob_ss
 
 class AdaAtt_lstm(nn.Module):
     def __init__(self, opt, use_maxout=True):
