@@ -77,10 +77,14 @@ class AttModel(CaptionModel):
 
         self.logit_layers = getattr(opt, 'logit_layers', 1)
         if self.logit_layers == 1:
-            self.logit = nn.Linear(self.rnn_size, self.vocab_size + 1)
+            self.logit = nn.Linear(self.rnn_size * 3, self.vocab_size + 1)
         else:
-            self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 1)]
-            self.logit = nn.Sequential(*(reduce(lambda x,y:x+y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
+            self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in range(opt.logit_layers - 2)]
+            self.logit = nn.Sequential(*(
+                    [nn.Linear(self.rnn_size * 3, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)]
+                    + reduce(lambda x,y:x+y, self.logit)
+                    + [nn.Linear(self.rnn_size, self.vocab_size + 1)]
+            ))
         self.ctx2att = nn.Linear(self.rnn_size, self.att_hid_size)
 
     def init_hidden(self, bsz):
@@ -409,26 +413,17 @@ class TopDownCore(nn.Module):
         super(TopDownCore, self).__init__()
         self.drop_prob_lm = opt.drop_prob_lm
 
-        self.att_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size * 2, opt.rnn_size) # we, fc, h^2_t-1
-        self.lang_lstm = nn.LSTMCell(opt.rnn_size * 2, opt.rnn_size) # h^1_t, \hat v
+        self.att_lstm = nn.LSTMCell(opt.rnn_size, opt.rnn_size)
+        self.lang_lstm = nn.LSTMCell(opt.input_encoding_size, opt.rnn_size)
         self.attention = Attention(opt)
 
     def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None):
-        prev_h = state[0][-1]
-        att_lstm_input = torch.cat([prev_h, fc_feats, xt], 1)
-
-        h_att, c_att = self.att_lstm(att_lstm_input, (state[0][0], state[1][0]))
-
-        att = self.attention(h_att, att_feats, p_att_feats, att_masks)
-
-        lang_lstm_input = torch.cat([att, h_att], 1)
-        # lang_lstm_input = torch.cat([att, F.dropout(h_att, self.drop_prob_lm, self.training)], 1) ?????
-
-        h_lang, c_lang = self.lang_lstm(lang_lstm_input, (state[0][1], state[1][1]))
-
-        output = F.dropout(h_lang, self.drop_prob_lm, self.training)
+        h_att, c_att = state[0][0], state[1][0]
+        h_lang, c_lang = self.lang_lstm(xt, (state[0][1], state[1][1]))
+        att = self.attention(torch.cat([h_att, h_lang, fc_feats], 1), att_feats, p_att_feats, att_masks)
+        h_att, c_att = self.att_lstm(att, (h_att, c_att))
+        output = F.dropout(torch.cat([h_att, h_lang, fc_feats], 1), self.drop_prob_lm, self.training)
         state = (torch.stack([h_att, h_lang]), torch.stack([c_att, c_lang]))
-
         return output, state
 
 
@@ -514,7 +509,7 @@ class Attention(nn.Module):
         self.rnn_size = opt.rnn_size
         self.att_hid_size = opt.att_hid_size
 
-        self.h2att = nn.Linear(self.rnn_size, self.att_hid_size)
+        self.h2att = nn.Linear(self.rnn_size * 3, self.att_hid_size)
         self.alpha_net = nn.Linear(self.att_hid_size, 1)
 
     def forward(self, h, att_feats, p_att_feats, att_masks=None):

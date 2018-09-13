@@ -102,10 +102,10 @@ def eval_split(model, crit, loader, eval_kwargs={}):
             seq = model(fc_feats, att_feats, att_masks, opt=eval_kwargs, mode='sample')[0].data
         
         # Print beam search
-        if beam_size > 1 and verbose_beam:
-            for i in range(loader.batch_size):
-                print('\n'.join([utils.decode_sequence(loader.get_vocab(), _['seq'].unsqueeze(0))[0] for _ in model.done_beams[i]]))
-                print('--' * 10)
+#        if beam_size > 1 and verbose_beam:
+#            for i in range(loader.batch_size):
+#                print('\n'.join([utils.decode_sequence(loader.get_vocab(), _['seq'].unsqueeze(0))[0] for _ in model.done_beams[i]]))
+#                print('--' * 10)
         sents = utils.decode_sequence(loader.get_vocab(), seq)
 
         for k, sent in enumerate(sents):
