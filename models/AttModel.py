@@ -437,7 +437,10 @@ class TopDownCore(nn.Module):
             c_att = next_c_att
         else:
             attend_prob = self.attend_gate(torch.cat([h_att, h_lang, fc_feats], 1)).squeeze(1)
-            attend_next = attend_prob.bernoulli()
+            if self.training:
+                attend_next = attend_prob.bernoulli()
+            else:
+                attend_next = (attend_prob > 0.5).float()
             prob_s = attend_prob * attend_next + (1 - attend_prob) * (1 - attend_next)
             log_prob_s = torch.log(prob_s + 1e-10)
             attend_next = attend_next.unsqueeze(1)
