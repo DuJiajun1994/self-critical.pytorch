@@ -62,14 +62,14 @@ class LanguageModelCriterion(nn.Module):
         target = target[:, :sequence_length]
         mask = mask[:, :sequence_length]
 
-        log_prob_y = log_prob_y.gather(2, target.unsqueeze(2)).squeeze(2) * mask
-        log_prob_s = log_prob_s * mask
-        loss = -(log_prob_s * (log_prob_y.clone().detach() - self.baseline) + log_prob_y)
+        log_prob_y = log_prob_y.gather(2, target.unsqueeze(2)).squeeze(2)
+        entropy = -(torch.exp(log_prob_s) * log_prob_s + torch.exp(1 - log_prob_s) * (1 - log_prob_s))
+        loss = -(log_prob_s * (log_prob_y.clone().detach() - self.baseline) + log_prob_y + entropy) * mask
         loss = loss.sum() / mask.sum()
-        cross_entropy_loss = - log_prob_y
+        cross_entropy_loss = - log_prob_y * mask
         cross_entropy_loss = cross_entropy_loss.sum() / mask.sum()
 
-        update = (log_prob_y.sum() / mask.sum()).data.item()
+        update = (- cross_entropy_loss).data.item()
         self.baseline = self.baseline * 0.9 + update * 0.1
         print('update {}, baseline {}'.format(update, self.baseline))
         return loss, cross_entropy_loss
