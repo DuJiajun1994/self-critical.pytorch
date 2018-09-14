@@ -41,29 +41,38 @@ class RewardCriterion(nn.Module):
     def __init__(self):
         super(RewardCriterion, self).__init__()
 
-    def forward(self, input, seq, reward):
-        input = to_contiguous(input).view(-1)
+    def forward(self, log_prob_y, log_prob_s, seq, reward):
+        log_prob_y = to_contiguous(log_prob_y).view(-1)
+        log_prob_s = to_contiguous(log_prob_s).view(-1)
         reward = to_contiguous(reward).view(-1)
         mask = (seq>0).float()
         mask = to_contiguous(torch.cat([mask.new(mask.size(0), 1).fill_(1), mask[:, :-1]], 1)).view(-1)
-        output = - input * reward * mask
+        output = - (log_prob_y + log_prob_s) * reward * mask
         output = torch.sum(output) / torch.sum(mask)
-
         return output
 
 class LanguageModelCriterion(nn.Module):
     def __init__(self):
         super(LanguageModelCriterion, self).__init__()
+        self.baseline = 0
 
-    def forward(self, input, target, mask):
+    def forward(self, log_prob_y, log_prob_s, target, mask):
         # truncate to the same size
-        target = target[:, :input.size(1)]
-        mask =  mask[:, :input.size(1)]
+        sequence_length = log_prob_y.size(1)
+        target = target[:, :sequence_length]
+        mask = mask[:, :sequence_length]
 
-        output = -input.gather(2, target.unsqueeze(2)).squeeze(2) * mask
-        output = torch.sum(output) / torch.sum(mask)
+        log_prob_y = log_prob_y.gather(2, target.unsqueeze(2)).squeeze(2) * mask
+        log_prob_s = log_prob_s * mask
+        loss = -(log_prob_s * (log_prob_y.clone().detach() - self.baseline) + log_prob_y)
+        loss = loss.sum() / mask.sum()
+        cross_entropy_loss = - log_prob_y
+        cross_entropy_loss = cross_entropy_loss.sum() / mask.sum()
 
-        return output
+        update = (log_prob_y.sum() / mask.sum()).data.item()
+        self.baseline = self.baseline * 0.9 + update * 0.1
+        print('update {}, baseline {}'.format(update, self.baseline))
+        return loss, cross_entropy_loss
 
 def set_lr(optimizer, lr):
     for group in optimizer.param_groups:

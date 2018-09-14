@@ -86,8 +86,9 @@ def eval_split(model, crit, loader, eval_kwargs={}):
             fc_feats, att_feats, labels, masks, att_masks = tmp
 
             with torch.no_grad():
-                loss = crit(model(fc_feats, att_feats, labels, att_masks), labels[:,1:], masks[:,1:]).item()
-            loss_sum = loss_sum + loss
+                log_prob_y, log_prob_s = model(fc_feats, att_feats, labels, att_masks)
+                _, loss = crit(log_prob_y, log_prob_s, labels[:,1:], masks[:,1:])
+            loss_sum = loss_sum + loss.item()
             loss_evals = loss_evals + 1
 
         # forward the model to also get generated samples for each image
