@@ -114,6 +114,7 @@ class AttModel(CaptionModel):
 
         log_prob_ys = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size+1)
         log_prob_ss = fc_feats.new_zeros(batch_size, seq.size(1) - 1)
+        entropys = fc_feats.new_zeros(batch_size, seq.size(1) - 1)
 
         # Prepare the features
         p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
@@ -139,19 +140,20 @@ class AttModel(CaptionModel):
             if i >= 1 and seq[:, i].sum() == 0:
                 break
 
-            log_prob_y, log_prob_s, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
+            log_prob_y, log_prob_s, entropy, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
             log_prob_ys[:, i] = log_prob_y
             log_prob_ss[:, i] = log_prob_s
+            entropys[:, i] = entropy
 
-        return log_prob_ys, log_prob_ss
+        return log_prob_ys, log_prob_ss, entropys
 
     def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state):
         # 'it' contains a word index
         xt = self.embed(it)
 
-        output, log_prob_s, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
+        output, log_prob_s, entropy, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
         log_prob_y = F.log_softmax(self.logit(output), dim=1)
-        return log_prob_y, log_prob_s, state
+        return log_prob_y, log_prob_s, entropy, state
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
         beam_size = opt.get('beam_size', 10)
@@ -176,7 +178,7 @@ class AttModel(CaptionModel):
                 if t == 0: # input <bos>
                     it = fc_feats.new_zeros([beam_size], dtype=torch.long)
 
-                logprobs, _, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state)
+                logprobs, _, _, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state)
 
             self.done_beams[k] = self.beam_search(state, logprobs, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, opt=opt)
             seq[:, k] = self.done_beams[k][0]['seq'] # the first beam has highest cumulative score
@@ -201,11 +203,12 @@ class AttModel(CaptionModel):
         seq = fc_feats.new_zeros((batch_size, self.seq_length), dtype=torch.long)
         seqLogprobs = fc_feats.new_zeros(batch_size, self.seq_length)
         log_prob_ss = fc_feats.new_zeros(batch_size, self.seq_length)
+        entropys = fc_feats.new_zeros(batch_size, self.seq_length)
         for t in range(self.seq_length + 1):
             if t == 0: # input <bos>
                 it = fc_feats.new_zeros(batch_size, dtype=torch.long)
 
-            logprobs, log_prob_s, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
+            logprobs, log_prob_s, entropy, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
             
             if decoding_constraint and t > 0:
                 tmp = logprobs.new_zeros(logprobs.size())
@@ -237,6 +240,7 @@ class AttModel(CaptionModel):
             seq[:,t] = it
             seqLogprobs[:,t] = sampleLogprobs.view(-1)
             log_prob_ss[:, t] = log_prob_s
+            entropys[:, t] = entropy
             # quit loop if all sequences have finished
             if unfinished.sum() == 0:
                 break
@@ -561,6 +565,7 @@ class Att2in2Core(nn.Module):
 
     def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None):
         weight = self.attention(state[0][-1], att_feats, p_att_feats, att_masks)
+        entropy = - torch.sum(weight * torch.log(weight + 1e-10), dim=1)
 
         all_input_sums = self.i2h(xt) + self.h2h(state[0][-1])
         sigmoid_chunk = all_input_sums.narrow(1, 0, 3 * self.rnn_size)
@@ -589,7 +594,7 @@ class Att2in2Core(nn.Module):
 
         output = self.dropout(next_h)
         state = (next_h.unsqueeze(0), next_c.unsqueeze(0))
-        return output, log_prob_s, state
+        return output, log_prob_s, entropy, state
 
 class Att2inCore(Att2in2Core):
     def __init__(self, opt):
@@ -623,6 +628,7 @@ class Att2all2Core(nn.Module):
 
     def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None):
         weight = self.attention(state[0][-1], att_feats, p_att_feats, att_masks)
+        entropy = - torch.sum(weight * torch.log(weight + 1e-10), dim=1)
 
         if self.training:
             indices = weight.multinomial(num_samples=1)
@@ -650,7 +656,7 @@ class Att2all2Core(nn.Module):
 
         output = self.dropout(next_h)
         state = (next_h.unsqueeze(0), next_c.unsqueeze(0))
-        return output, log_prob_s, state
+        return output, log_prob_s, entropy, state
 
 class AdaAttModel(AttModel):
     def __init__(self, opt):
