@@ -122,8 +122,8 @@ def train(opt):
         
         optimizer.zero_grad()
         if not sc_flag:
-            log_prob_y, log_prob_s = dp_model(fc_feats, att_feats, labels, att_masks)
-            loss, cross_entropy_loss = crit(log_prob_y, log_prob_s, labels[:, 1:], masks[:, 1:])
+            log_prob_y, log_prob_s, attend_next = dp_model(fc_feats, att_feats, labels, att_masks)
+            loss, cross_entropy_loss = crit(log_prob_y, log_prob_s, attend_next, labels[:, 1:], masks[:, 1:])
             train_loss = cross_entropy_loss.item()
         else:
             gen_result, log_prob_y, log_prob_s = dp_model(fc_feats, att_feats, att_masks, opt={'sample_max':0}, mode='sample')

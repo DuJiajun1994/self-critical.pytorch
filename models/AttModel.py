@@ -118,6 +118,7 @@ class AttModel(CaptionModel):
 
         log_prob_ys = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size+1)
         log_prob_ss = fc_feats.new_zeros(batch_size, seq.size(1) - 1)
+        attend_nexts = fc_feats.new_zeros(batch_size, seq.size(1) - 1)
 
         # Prepare the features
         p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
@@ -144,19 +145,20 @@ class AttModel(CaptionModel):
                 break
 
             is_first = (i == 0)
-            log_prob_y, log_prob_s, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, is_first)
+            log_prob_y, log_prob_s, attend_next, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, is_first)
             log_prob_ys[:, i] = log_prob_y
             log_prob_ss[:, i] = log_prob_s
+            attend_nexts[:, i] = attend_next
 
-        return log_prob_ys, log_prob_ss
+        return log_prob_ys, log_prob_ss, attend_nexts
 
     def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state, is_first=False):
         # 'it' contains a word index
         xt = self.embed(it)
 
-        output, log_prob_s, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks, is_first)
+        output, log_prob_s, attend_next, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks, is_first)
         log_prob_y = F.log_softmax(self.logit(output), dim=1)
-        return log_prob_y, log_prob_s, state
+        return log_prob_y, log_prob_s, attend_next, state
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
         beam_size = opt.get('beam_size', 10)
@@ -181,7 +183,7 @@ class AttModel(CaptionModel):
                 if t == 0: # input <bos>
                     it = fc_feats.new_zeros([beam_size], dtype=torch.long)
 
-                logprobs, _, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state, True)
+                logprobs, _, _, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state, True)
 
             self.done_beams[k] = self.beam_search(state, logprobs, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, opt=opt)
             seq[:, k] = self.done_beams[k][0]['seq'] # the first beam has highest cumulative score
@@ -206,12 +208,13 @@ class AttModel(CaptionModel):
         seq = fc_feats.new_zeros((batch_size, self.seq_length), dtype=torch.long)
         seqLogprobs = fc_feats.new_zeros(batch_size, self.seq_length)
         log_prob_ss = fc_feats.new_zeros(batch_size, self.seq_length)
+        attend_nexts = fc_feats.new_zeros(batch_size, self.seq_length)
         for t in range(self.seq_length + 1):
             if t == 0: # input <bos>
                 it = fc_feats.new_zeros(batch_size, dtype=torch.long)
 
             is_first = (t == 0)
-            logprobs, log_prob_s, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, is_first)
+            logprobs, log_prob_s, attend_next, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, is_first)
             
             if decoding_constraint and t > 0:
                 tmp = logprobs.new_zeros(logprobs.size())
@@ -243,11 +246,12 @@ class AttModel(CaptionModel):
             seq[:,t] = it
             seqLogprobs[:,t] = sampleLogprobs.view(-1)
             log_prob_ss[:, t] = log_prob_s
+            attend_nexts[:, t] = attend_next
             # quit loop if all sequences have finished
             if unfinished.sum() == 0:
                 break
 
-        return seq, seqLogprobs, log_prob_ss
+        return seq, seqLogprobs, log_prob_ss, attend_nexts
 
 class AdaAtt_lstm(nn.Module):
     def __init__(self, opt, use_maxout=True):
@@ -421,7 +425,7 @@ class TopDownCore(nn.Module):
         self.att_lstm = nn.LSTMCell(opt.rnn_size, opt.rnn_size)
         self.lang_lstm = nn.LSTMCell(opt.input_encoding_size, opt.rnn_size)
         self.attention = Attention(opt)
-        self.attend_gate = nn.Sequential(nn.Linear(opt.rnn_size * 3, opt.rnn_size),
+        self.attend_gate = nn.Sequential(nn.Linear(opt.rnn_size, opt.rnn_size),
                                          nn.ReLU(),
                                          nn.Linear(opt.rnn_size, 1),
                                          nn.Sigmoid())
@@ -432,15 +436,18 @@ class TopDownCore(nn.Module):
         att = self.attention(torch.cat([h_att, h_lang, fc_feats], 1), att_feats, p_att_feats, att_masks)
         next_h_att, next_c_att = self.att_lstm(att, (h_att, c_att))
         if is_first:
+            attend_prob = fc_feats.new_ones([fc_feats.size(0)])
             log_prob_s = fc_feats.new_zeros([fc_feats.size(0)])
             h_att = next_h_att
             c_att = next_c_att
         else:
-            attend_prob = self.attend_gate(torch.cat([h_att, h_lang, fc_feats], 1)).squeeze(1)
+            attend_prob = self.attend_gate(h_lang).squeeze(1)
             if self.training:
                 attend_next = attend_prob.bernoulli()
             else:
                 attend_next = (attend_prob > 0.5).float()
+            print(attend_prob)
+            print(attend_next)
             prob_s = attend_prob * attend_next + (1 - attend_prob) * (1 - attend_next)
             log_prob_s = torch.log(prob_s + 1e-10)
             attend_next = attend_next.unsqueeze(1)
@@ -448,7 +455,7 @@ class TopDownCore(nn.Module):
             c_att = next_c_att * attend_next + c_att * (1 - attend_next)
         output = F.dropout(torch.cat([h_att, h_lang, fc_feats], 1), self.drop_prob_lm, self.training)
         state = (torch.stack([h_att, h_lang]), torch.stack([c_att, c_lang]))
-        return output, log_prob_s, state
+        return output, log_prob_s, attend_prob, state
 
 
 ############################################################################

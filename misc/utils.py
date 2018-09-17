@@ -56,16 +56,14 @@ class LanguageModelCriterion(nn.Module):
         super(LanguageModelCriterion, self).__init__()
         self.baseline = 0
 
-    def forward(self, log_prob_y, log_prob_s, target, mask):
+    def forward(self, log_prob_y, log_prob_s, attend_next, target, mask):
         # truncate to the same size
         sequence_length = log_prob_y.size(1)
         target = target[:, :sequence_length]
         mask = mask[:, :sequence_length]
 
         log_prob_y = log_prob_y.gather(2, target.unsqueeze(2)).squeeze(2)
-        prob_s = torch.exp(log_prob_s)
-        entropy = - (prob_s * log_prob_s + (1 - prob_s) * torch.log(1 + 1e-10 - prob_s))
-        loss = -(log_prob_s * (log_prob_y.clone().detach() - self.baseline) + log_prob_y + entropy) * mask
+        loss = -(log_prob_s * (log_prob_y.clone().detach() - self.baseline) + log_prob_y + (1 - attend_next) * 0.1) * mask
         loss = loss.sum() / mask.sum()
         cross_entropy_loss = - log_prob_y * mask
         cross_entropy_loss = cross_entropy_loss.sum() / mask.sum()
