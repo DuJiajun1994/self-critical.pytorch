@@ -147,7 +147,7 @@ class AttModel(CaptionModel):
 
         return outputs
 
-    def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state, sample_max):
+    def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state, sample_max=True):
         # 'it' contains a word index
         xt = self.embed(it)
 
@@ -436,13 +436,13 @@ class TopDownCore(nn.Module):
             log_attend_prob = log_attend_prob \
                               + torch.log(attend_prob * attend_next + (1 - attend_prob) * (1 - attend_next) + 1e-10) * attend_next_mask
             attend_next_mask = attend_next_mask * attend_next
+            if attend_next_mask.sum() == 0:
+                break
             att = self.attention(torch.cat([h_att, h_lang, fc_feats], 1), att_feats, p_att_feats, att_masks)
             next_h_att, next_c_att = self.att_lstm(torch.cat([att, h_lang], 1), (h_att, c_att))
             _attend_next_mask = attend_next_mask.unsqueeze(1)
             h_att = next_h_att * _attend_next_mask + h_att * (1 - _attend_next_mask)
             c_att = next_c_att * _attend_next_mask + c_att * (1 - _attend_next_mask)
-            if attend_next_mask.sum() == 0:
-                break
         output = F.dropout(torch.cat([h_att, h_lang, fc_feats], 1), self.drop_prob_lm, self.training)
         state = (torch.stack([h_att, h_lang]), torch.stack([c_att, c_lang]))
         return output, log_attend_prob, state
