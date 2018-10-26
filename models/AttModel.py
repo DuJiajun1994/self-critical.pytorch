@@ -142,19 +142,19 @@ class AttModel(CaptionModel):
             if i >= 1 and seq[:, i].sum() == 0:
                 break
 
-            output, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
+            output, _, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, sample_max=False)
             outputs[:, i] = output
 
         return outputs
 
-    def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state):
+    def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state, sample_max):
         # 'it' contains a word index
         xt = self.embed(it)
 
-        output, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
+        output, log_attend_prob, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks, sample_max=sample_max)
         logprobs = F.log_softmax(self.logit(output), dim=1)
 
-        return logprobs, state
+        return logprobs, log_attend_prob, state
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
         beam_size = opt.get('beam_size', 10)
@@ -179,7 +179,7 @@ class AttModel(CaptionModel):
                 if t == 0: # input <bos>
                     it = fc_feats.new_zeros([beam_size], dtype=torch.long)
 
-                logprobs, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state)
+                logprobs, _, state = self.get_logprobs_state(it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, state, sample_max=True)
 
             self.done_beams[k] = self.beam_search(state, logprobs, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, tmp_att_masks, opt=opt)
             seq[:, k] = self.done_beams[k][0]['seq'] # the first beam has highest cumulative score
@@ -207,7 +207,7 @@ class AttModel(CaptionModel):
             if t == 0: # input <bos>
                 it = fc_feats.new_zeros(batch_size, dtype=torch.long)
 
-            logprobs, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
+            logprobs, log_attend_prob, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, sample_max=sample_max)
             
             if decoding_constraint and t > 0:
                 tmp = logprobs.new_zeros(logprobs.size())
@@ -237,7 +237,7 @@ class AttModel(CaptionModel):
                 unfinished = unfinished * (it > 0)
             it = it * unfinished.type_as(it)
             seq[:,t] = it
-            seqLogprobs[:,t] = sampleLogprobs.view(-1)
+            seqLogprobs[:,t] = sampleLogprobs.view(-1) + log_attend_prob
             # quit loop if all sequences have finished
             if unfinished.sum() == 0:
                 break
@@ -416,16 +416,36 @@ class TopDownCore(nn.Module):
         self.att_lstm = nn.LSTMCell(opt.rnn_size * 2, opt.rnn_size)
         self.lang_lstm = nn.LSTMCell(opt.input_encoding_size, opt.rnn_size)
         self.attention = Attention(opt)
+        self.attend_gate = nn.Sequential(nn.Linear(opt.rnn_size * 3, opt.rnn_size),
+                                         nn.ReLU(),
+                                         nn.Linear(opt.rnn_size, 1),
+                                         nn.Sigmoid())
 
-    def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None):
+    def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None, sample_max=False):
+        batch_size = fc_feats.size(0)
         h_att, c_att = state[0][0], state[1][0]
         h_lang, c_lang = self.lang_lstm(xt, (state[0][1], state[1][1]))
-        for i in range(2):
+        log_attend_prob = fc_feats.new_zeros([batch_size])
+        attend_next_mask = fc_feats.new_ones([batch_size])
+        for _ in range(5):
+            attend_prob = self.attend_gate(torch.cat([h_att, h_lang, fc_feats], 1)).squeeze(1)
+            if sample_max:
+                attend_next = (attend_prob > 0.5).float()
+            else:
+                attend_next = attend_prob.bernoulli()
+            log_attend_prob = log_attend_prob \
+                              + torch.log(attend_prob * attend_next + (1 - attend_prob) * (1 - attend_next) + 1e-10) * attend_next_mask
+            attend_next_mask = attend_next_mask * attend_next
             att = self.attention(torch.cat([h_att, h_lang, fc_feats], 1), att_feats, p_att_feats, att_masks)
-            h_att, c_att = self.att_lstm(torch.cat([att, h_lang], 1), (h_att, c_att))
+            next_h_att, next_c_att = self.att_lstm(torch.cat([att, h_lang], 1), (h_att, c_att))
+            _attend_next_mask = attend_next_mask.unsqueeze(1)
+            h_att = next_h_att * _attend_next_mask + h_att * (1 - _attend_next_mask)
+            c_att = next_c_att * _attend_next_mask + c_att * (1 - _attend_next_mask)
+            if attend_next_mask.sum() == 0:
+                break
         output = F.dropout(torch.cat([h_att, h_lang, fc_feats], 1), self.drop_prob_lm, self.training)
         state = (torch.stack([h_att, h_lang]), torch.stack([c_att, c_lang]))
-        return output, state
+        return output, log_attend_prob, state
 
 
 ############################################################################
