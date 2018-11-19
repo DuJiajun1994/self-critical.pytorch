@@ -54,25 +54,16 @@ class RewardCriterion(nn.Module):
 class LanguageModelCriterion(nn.Module):
     def __init__(self):
         super(LanguageModelCriterion, self).__init__()
-        self.baseline = 0
 
-    def forward(self, log_prob_y, log_prob_s, target, mask):
+    def forward(self, input, target, mask):
         # truncate to the same size
-        sequence_length = log_prob_y.size(1)
-        target = target[:, :sequence_length]
-        mask = mask[:, :sequence_length]
+        target = target[:, :input.size(1)]
+        mask =  mask[:, :input.size(1)]
 
-        log_prob_y = log_prob_y.gather(2, target.unsqueeze(2)).squeeze(2)
-        reward = (log_prob_y * mask).sum(1) / mask.sum(1)
+        output = -input.gather(2, target.unsqueeze(2)).squeeze(2) * mask
+        output = torch.sum(output) / torch.sum(mask)
 
-        loss = -(log_prob_s * (reward.detach() - self.baseline).unsqueeze(1) + log_prob_y)
-        loss = (loss * mask).sum() / mask.sum()
-        update = reward.mean().data.item()
-        self.baseline = self.baseline * 0.9 + update * 0.1
-        print('update {}, baseline {}'.format(update, self.baseline))
-
-        cross_entropy_loss = (- log_prob_y * mask).sum() / mask.sum()
-        return loss, cross_entropy_loss
+        return output
 
 def set_lr(optimizer, lr):
     for group in optimizer.param_groups:

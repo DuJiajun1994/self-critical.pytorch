@@ -107,7 +107,7 @@ def train(opt):
                 sc_flag = False
 
             update_lr_flag = False
-                
+
         start = time.time()
         # Load data from train split (0)
         data = loader.get_batch('train')
@@ -119,21 +119,20 @@ def train(opt):
         tmp = [data['fc_feats'], data['att_feats'], data['labels'], data['masks'], data['att_masks']]
         tmp = [_ if _ is None else torch.from_numpy(_).cuda() for _ in tmp]
         fc_feats, att_feats, labels, masks, att_masks = tmp
-        
+
         optimizer.zero_grad()
         if not sc_flag:
-            log_prob_y, log_prob_s = dp_model(fc_feats, att_feats, labels, att_masks)
-            loss, cross_entropy_loss = crit(log_prob_y, log_prob_s, labels[:, 1:], masks[:, 1:])
-            train_loss = cross_entropy_loss.item()
+            log_prob_y = dp_model(fc_feats, att_feats, labels, att_masks)
+            loss = crit(log_prob_y, labels[:, 1:], masks[:, 1:])
         else:
             gen_result, log_prob_y, log_prob_s = dp_model(fc_feats, att_feats, att_masks, opt={'sample_max':0}, mode='sample')
             reward = get_self_critical_reward(dp_model, fc_feats, att_feats, att_masks, data, gen_result, opt)
             loss = rl_crit(log_prob_y, log_prob_s, gen_result.data, torch.from_numpy(reward).float().cuda())
-            train_loss = loss.item()
 
         loss.backward()
         utils.clip_gradient(optimizer, opt.grad_clip)
         optimizer.step()
+        train_loss = loss.item()
         torch.cuda.synchronize()
         end = time.time()
         if not sc_flag:

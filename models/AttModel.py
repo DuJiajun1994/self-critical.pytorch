@@ -117,7 +117,6 @@ class AttModel(CaptionModel):
         state = self.init_hidden(batch_size)
 
         outputs = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size+1)
-        log_attend_probs = fc_feats.new_zeros(batch_size, seq.size(1) - 1)
 
         # Prepare the features
         p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
@@ -143,11 +142,10 @@ class AttModel(CaptionModel):
             if i >= 1 and seq[:, i].sum() == 0:
                 break
 
-            output, log_attend_prob, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, sample_max=False)
+            output, _, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state, sample_max=False)
             outputs[:, i] = output
-            log_attend_probs[:, i] = log_attend_prob
 
-        return outputs, log_attend_probs
+        return outputs
 
     def get_logprobs_state(self, it, fc_feats, att_feats, p_att_feats, att_masks, state, sample_max=True):
         # 'it' contains a word index
@@ -420,21 +418,25 @@ class TopDownCore(nn.Module):
         self.att_lstm = nn.LSTMCell(opt.rnn_size * 2, opt.rnn_size)
         self.lang_lstm = nn.LSTMCell(opt.input_encoding_size, opt.rnn_size)
         self.attention = Attention(opt)
+        self.is_hard = False
 
     def forward(self, xt, fc_feats, att_feats, p_att_feats, state, att_masks=None, sample_max=False):
         batch_size = fc_feats.size(0)
         h_att, c_att = state[0][0], state[1][0]
         h_lang, c_lang = self.lang_lstm(xt, (state[0][1], state[1][1]))
         log_attend_prob = fc_feats.new_zeros([batch_size])
-        for _ in range(3):
+        for _ in range(1):
             weight = self.attention(torch.cat([h_att, h_lang, fc_feats], 1), att_feats, p_att_feats, att_masks)
-            if sample_max:
-                indices = weight.argmax(dim=-1)
+            if self.is_hard:
+                if sample_max:
+                    indices = weight.argmax(dim=-1)
+                else:
+                    indices = weight.multinomial(num_samples=1)
+                one_hot = weight.new_zeros(weight.size())
+                one_hot.scatter_(1, indices.view(-1, 1), 1)
+                att = torch.bmm(one_hot.unsqueeze(1), att_feats).squeeze(1)
             else:
-                indices = weight.multinomial(num_samples=1)
-            one_hot = weight.new_zeros(weight.size())
-            one_hot.scatter_(1, indices.view(-1, 1), 1)
-            att = torch.bmm(one_hot.unsqueeze(1), att_feats).squeeze(1)
+                att = torch.bmm(weight.unsqueeze(1), att_feats).squeeze(1)
             attend_prob = weight.gather(dim=1, index=indices.view(-1, 1)).squeeze(1)
             log_attend_prob = log_attend_prob + torch.log(attend_prob + 1e-10)
             h_att, c_att = self.att_lstm(torch.cat([att, h_lang], 1), (h_att, c_att))
