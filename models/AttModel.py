@@ -435,10 +435,10 @@ class TopDownCore(nn.Module):
                 one_hot = weight.new_zeros(weight.size())
                 one_hot.scatter_(1, indices.view(-1, 1), 1)
                 att = torch.bmm(one_hot.unsqueeze(1), att_feats).squeeze(1)
+                attend_prob = weight.gather(dim=1, index=indices.view(-1, 1)).squeeze(1)
+                log_attend_prob = log_attend_prob + torch.log(attend_prob + 1e-10)
             else:
                 att = torch.bmm(weight.unsqueeze(1), att_feats).squeeze(1)
-            attend_prob = weight.gather(dim=1, index=indices.view(-1, 1)).squeeze(1)
-            log_attend_prob = log_attend_prob + torch.log(attend_prob + 1e-10)
             h_att, c_att = self.att_lstm(torch.cat([att, h_lang], 1), (h_att, c_att))
         output = F.dropout(torch.cat([h_att, h_lang, fc_feats], 1), self.drop_prob_lm, self.training)
         state = (torch.stack([h_att, h_lang]), torch.stack([c_att, c_lang]))
